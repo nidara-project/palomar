@@ -53,7 +53,7 @@ the human, `$USER`. `palomar whoami` says which, and why. To give an agent anoth
 
 ```json
 // ~/.config/palomar/names.json
-{"codex": "sol"}
+{"codex": "codex-gpt"}
 ```
 
 This stops an agent from writing as another by mistake, or by passing a flag. It does **not**

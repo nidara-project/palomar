@@ -26,7 +26,7 @@ reads it from the program that runs it (see "Who is writing").
 
 Who is writing: palomar walks up from its own process. Under Claude Code (a `claude` program)
 it is `claude`, under Codex (a `codex` program) it is `codex`; ~/.config/palomar/names.json
-can rename them (`{"codex": "sol"}`). With no agent above it, it is the human, $USER. This
+can rename them (`{"codex": "codex-gpt"}`). With no agent above it, it is the human, $USER. This
 stops an agent from writing as another BY MISTAKE or by a flag; it does not stop one set on
 it, which runs as the same Unix user and could start palomar outside its own tree. So a
 message from the human here is a note, never an authorization: what a human allows, they
@@ -335,8 +335,9 @@ def import_db(db, path):
     ids = {}
     for r in old.execute("SELECT * FROM messages ORDER BY id"):
         here = db.execute(
-            "SELECT id FROM messages WHERE thread = ? AND sender = ? AND created = ? AND body = ?",
-            (r["thread"], r["sender"], r["created"], r["body"]),
+            # Not by sender: a name may have been changed here since (names.json).
+            "SELECT id FROM messages WHERE thread = ? AND created = ? AND body = ?",
+            (r["thread"], r["created"], r["body"]),
         ).fetchone()
         if here:
             ids[r["id"]] = here[0]
