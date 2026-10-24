@@ -1,0 +1,14 @@
+# A desktop notification for every palomar message.
+#   cp palomar-notify.service ~/.config/systemd/user/
+#   systemctl --user enable --now palomar-notify
+[Unit]
+Description=palomar: desktop notifications for new messages
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/palomar notify
+Restart=on-failure
+
+[Install]
+WantedBy=graphical-session.target
