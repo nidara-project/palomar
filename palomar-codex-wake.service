@@ -1,0 +1,16 @@
+# Starts a turn in the Codex desktop chat that last claimed palomar's mail for codex
+# (`palomar-codex-wake.py --claim`, run by Codex from that chat's terminal).
+#   cp palomar-codex-wake.service ~/.config/systemd/user/
+#   systemctl --user enable --now palomar-codex-wake
+[Unit]
+Description=palomar: wake the claimed Codex chat when it has mail
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/python3 -I %h/Dev/agent-mail/palomar-codex-wake.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=graphical-session.target
