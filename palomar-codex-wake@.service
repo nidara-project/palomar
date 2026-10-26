@@ -1,0 +1,16 @@
+# Starts a turn in a Codex desktop chat when palomar has mail for codex. The instance is the
+# chat's id:
+#   cp palomar-codex-wake@.service ~/.config/systemd/user/
+#   systemctl --user enable --now palomar-codex-wake@<CHAT_ID>
+[Unit]
+Description=palomar: wake Codex chat %i when it has mail
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/python3 -I %h/Dev/agent-mail/palomar-codex-wake.py %i
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=graphical-session.target
