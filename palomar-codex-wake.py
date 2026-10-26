@@ -7,9 +7,13 @@ watches palomar for messages to READER (default `codex`) and, when there are som
 Codex desktop app to start a turn in ONE chat — the same chat, with its history, not a new
 `codex exec` — whose input says there is mail and lists it, one line each.
 
-    palomar-codex-wake.py THREAD_ID [--reader NAME] [--once]
+    palomar-codex-wake.py [THREAD_ID] [--reader NAME] [--once]
+    palomar-codex-wake.py --claim [THREAD_ID]
 
-THREAD_ID is the chat's id (Codex shows it; in the chat, it is the conversation's id).
+Which chat: the one that last CLAIMED it. Codex runs `palomar-codex-wake.py --claim` from its
+own terminal, where `$CODEX_THREAD_ID` is that chat's id, and the id is saved in CLAIM_FILE;
+the watcher reads it again before every delivery, so a new chat takes over without restarting
+anything. A THREAD_ID given to the watcher pins it to that chat instead.
 
 How it reaches the chat: the desktop app's IPC router, ~/.codex/ipc/ipc.sock (a 4-byte
 little-endian length, then JSON). A client `initialize`s, then sends
@@ -50,6 +54,8 @@ START_TURN_VERSION = 2
 SETTLE = 3.0    # after the first new message, wait this long for the rest of a burst
 RETRY = 20.0    # the chat was busy or unreachable: try again after this long
 TIMEOUT = 30.0
+CLAIM_FILE = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
+                          "palomar", "codex-chat")
 
 
 def log(*a):
@@ -124,18 +130,46 @@ def wake_text(reader, rows):
     )
 
 
+def claim(thread_id):
+    thread_id = thread_id or os.environ.get("CODEX_THREAD_ID")
+    if not thread_id:
+        print("no chat id: run this from Codex's terminal (it sets $CODEX_THREAD_ID), "
+              "or pass the id", file=sys.stderr)
+        return 1
+    os.makedirs(os.path.dirname(CLAIM_FILE), exist_ok=True)
+    tmp = CLAIM_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(thread_id + "\n")
+    os.replace(tmp, CLAIM_FILE)
+    print(f"palomar mail for codex now wakes chat {thread_id}")
+    return 0
+
+
+def claimed():
+    try:
+        with open(CLAIM_FILE) as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
 def main(argv):
     p = argparse.ArgumentParser(prog="palomar-codex-wake.py")
-    p.add_argument("thread_id")
+    p.add_argument("thread_id", nargs="?")
+    p.add_argument("--claim", action="store_true",
+                   help="make this chat (or THREAD_ID) the one palomar wakes, and exit")
     p.add_argument("--reader", default="codex")
     p.add_argument("--once", action="store_true",
                    help="deliver what is unread now (no settle) and exit: 0 delivered, 1 not")
     a = p.parse_args(argv)
+    if a.claim:
+        return claim(a.thread_id)
     db = palomar.connect()
     # Delivered up to here: starts at the newest message, so old mail never wakes anyone.
     # In memory on purpose — a restart re-delivers nothing older than itself.
     delivered = 0 if a.once else db.execute("SELECT coalesce(max(id), 0) FROM messages").fetchone()[0]
-    log(f"watching palomar for {a.reader} → Codex chat {a.thread_id} (after #{delivered})")
+    log(f"watching palomar for {a.reader} → Codex chat "
+        f"{a.thread_id or 'claimed in ' + CLAIM_FILE} (after #{delivered})")
     pending_since = None
     next_try = 0.0
     while True:
@@ -144,10 +178,12 @@ def main(argv):
         if not rows:
             pending_since = None
         elif a.once or (pending_since is not None and now - pending_since >= SETTLE and now >= next_try):
-            why = start_turn(a.thread_id, wake_text(a.reader, rows))
+            chat = a.thread_id or claimed()
+            why = (start_turn(chat, wake_text(a.reader, rows)) if chat
+                   else "no chat has claimed it (palomar-codex-wake.py --claim)")
             if why is None:
                 delivered = rows[-1]["id"]
-                log(f"woke the chat for {len(rows)} message(s), up to #{delivered}")
+                log(f"woke chat {chat} for {len(rows)} message(s), up to #{delivered}")
                 pending_since = None
                 if a.once:
                     return 0

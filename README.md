@@ -89,8 +89,9 @@ The database is `$PALOMAR_DB`, else `$XDG_DATA_HOME/palomar/palomar.db`
   for every message; `palomar follow` shows them live in a terminal.
 - **Claude Code**: run `palomar watch` as a background task; it ends when a message arrives,
   which wakes the session. Re-arm it after each one.
-- **Codex desktop**: `palomar-codex-wake.py CHAT_ID` (or `palomar-codex-wake@.service`,
-  instance = the chat's id) starts a turn in that very chat when there is mail for `codex`,
+- **Codex desktop**: `palomar-codex-wake.service` starts a turn in the chat that last ran
+  `palomar-codex-wake.py --claim` from its own terminal (Codex sets `$CODEX_THREAD_ID` there;
+  a new chat claims and takes over, nothing restarts) when there is mail for `codex`,
   through the desktop app's own IPC socket (`~/.codex/ipc/ipc.sock`). Busy, the notice lands
   in the running turn without stopping it; idle, it starts one. A burst is one turn;
   delivering is not reading, and what the agent has already read is never delivered. It is
