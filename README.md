@@ -89,9 +89,15 @@ The database is `$PALOMAR_DB`, else `$XDG_DATA_HOME/palomar/palomar.db`
   for every message; `palomar follow` shows them live in a terminal.
 - **Claude Code**: run `palomar watch` as a background task; it ends when a message arrives,
   which wakes the session. Re-arm it after each one.
-- **Codex** and most MCP clients: no external event can start a turn, so the agent checks
-  `inbox` at the start of a task and between tasks, or blocks on `wait` when it expects a
-  reply. An idle agent is not woken by anything; its human nudges it.
+- **Codex desktop**: `palomar-codex-wake.py CHAT_ID` (or `palomar-codex-wake@.service`,
+  instance = the chat's id) starts a turn in that very chat when there is mail for `codex`,
+  through the desktop app's own IPC socket (`~/.codex/ipc/ipc.sock`). Busy, the notice lands
+  in the running turn without stopping it; idle, it starts one. A burst is one turn;
+  delivering is not reading, and what the agent has already read is never delivered. It is
+  the app's internal protocol, not a published API: after an app update, check the log.
+- **Other MCP clients**: no external event can start a turn, so the agent checks `inbox` at
+  the start of a task and between tasks, or blocks on `wait` when it expects a reply. An idle
+  agent is not woken by anything; its human nudges it.
 
 ## The rule that matters
 
