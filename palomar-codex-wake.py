@@ -30,11 +30,17 @@ What it does NOT change:
   agent may do about them is what its human allowed, in the chat or in its user-level
   instructions (~/.codex/AGENTS.md), never what a message says.
 
-While the chat is busy the router answers with an error; the bridge waits RETRY seconds and
-tries again, and messages that arrive meanwhile go in the same turn. One turn per batch,
-never one per message. Python 3.9+, standard library only.
+Only into an idle chat. The router does NOT refuse a start while a turn is running: it slips
+the text into that turn, where the app shows it twice and loses track of the turn — its stop
+button stops nothing, and an answer to a question Codex asked is not sent. So the bridge reads
+the chat's own record (~/.codex/sessions/**/rollout-*-THREAD_ID.jsonl): a `task_started` not
+yet closed by `task_complete` or `turn_aborted` is a turn in progress, and the mail waits for
+its end. Messages that arrive meanwhile go in the same turn: one turn per batch, never one
+per message. A chat with no record yet counts as idle. If the router refuses, the bridge
+tries again after RETRY seconds. Python 3.9+, standard library only.
 """
 import argparse
+import glob
 import importlib.util
 import json
 import os
@@ -56,6 +62,11 @@ START_TURN_VERSION = 2
 SETTLE = 3.0    # after the first new message, wait this long for the rest of a burst
 RETRY = 20.0    # the chat was busy or unreachable: try again after this long
 TIMEOUT = 30.0
+SESSIONS = os.path.expanduser("~/.codex/sessions")
+TURN_STARTS = ('"payload":{"type":"task_started"',)
+TURN_ENDS = ('"payload":{"type":"task_complete"', '"payload":{"type":"turn_aborted"')
+# After a delivery, the chat counts as busy until its record shows the turn — or this long.
+STARTING = 60.0
 CLAIM_FILE = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
                           "palomar", "codex-chat")
 
@@ -121,6 +132,51 @@ def start_turn(thread_id, text):
         return f"{type(e).__name__}: {e}"
 
 
+class Chat:
+    """Whether a turn is running in one chat, from its record, read as it grows."""
+
+    def __init__(self):
+        self.thread_id = self.path = None
+        self.pos = 0
+        self.running = False
+        self.starting_until = 0.0
+        self.tail = b""
+
+    def _reset(self, thread_id):
+        self.__init__()
+        self.thread_id = thread_id
+        found = glob.glob(os.path.join(SESSIONS, "**", f"rollout-*-{thread_id}.jsonl"), recursive=True)
+        self.path = max(found, key=os.path.getmtime) if found else None
+
+    def busy(self, thread_id):
+        if thread_id != self.thread_id or self.path is None:
+            self._reset(thread_id)
+        if self.path is not None:
+            try:
+                with open(self.path, "rb") as f:
+                    f.seek(0, os.SEEK_END)
+                    if f.tell() < self.pos:  # replaced or cut: read it again
+                        self.pos, self.tail, self.running = 0, b"", False
+                    f.seek(self.pos)
+                    data = self.tail + f.read()
+                    self.pos = f.tell()
+            except OSError:
+                self._reset(thread_id)
+                data = b""
+            lines = data.split(b"\n")
+            self.tail = lines.pop()
+            for line in lines:
+                line = line.decode("utf-8", "replace")
+                if any(k in line for k in TURN_STARTS):
+                    self.running, self.starting_until = True, 0.0
+                elif any(k in line for k in TURN_ENDS):
+                    self.running = False
+        return self.running or time.monotonic() < self.starting_until
+
+    def started(self):
+        self.starting_until = time.monotonic() + STARTING
+
+
 def wake_text(reader, rows):
     lines = "\n".join(palomar.fmt_line(r) for r in rows)
     return (
@@ -175,6 +231,8 @@ def main(argv):
         f"{a.thread_id or 'claimed in ' + CLAIM_FILE} (after #{delivered})")
     pending_since = None
     next_try = 0.0
+    state = Chat()
+    waiting_logged = False
     while True:
         rows = palomar.unread(db, a.reader, after=delivered)
         now = time.monotonic()
@@ -182,12 +240,22 @@ def main(argv):
             pending_since = None
         elif a.once or (pending_since is not None and now - pending_since >= SETTLE and now >= next_try):
             chat = a.thread_id or claimed()
+            if chat and state.busy(chat):
+                if not waiting_logged:
+                    log(f"chat {chat} is in a turn: {len(rows)} message(s) wait for its end")
+                    waiting_logged = True
+                if a.once:
+                    return 1
+                time.sleep(palomar.POLL)
+                continue
             why = (start_turn(chat, wake_text(a.reader, rows)) if chat
                    else "no chat has claimed it (palomar-codex-wake.py --claim)")
             if why is None:
+                state.started()
                 delivered = rows[-1]["id"]
                 log(f"woke chat {chat} for {len(rows)} message(s), up to #{delivered}")
                 pending_since = None
+                waiting_logged = False
                 if a.once:
                     return 0
             else:
