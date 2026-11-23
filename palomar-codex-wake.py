@@ -15,12 +15,14 @@ own terminal, where `$CODEX_THREAD_ID` is that chat's id, and the id is saved in
 the watcher reads it again before every delivery, so a new chat takes over without restarting
 anything. A THREAD_ID given to the watcher pins it to that chat instead.
 
-How it reaches the chat: the desktop app's IPC router, ~/.codex/ipc/ipc.sock (a 4-byte
-little-endian length, then JSON). A client `initialize`s, then sends
-`thread-follower-start-turn`; the router asks every window which one owns that chat, and that
-window starts the turn exactly as if it had been typed there. This is the app's own protocol
-between its windows, not a published API: an app update may change it, and the bridge then
-logs the refusal and keeps the mail undelivered rather than guessing.
+How it reaches the chat: `codex queue --thread ID --message TEXT`, the Codex CLI's own command
+to queue a message for an existing session (the CLI ships inside the desktop app, at
+/usr/lib/chatgpt/resources/codex; CODEX_BIN overrides). The desktop app picks the queued message
+up and starts the turn in that chat (its record says `"turn_trigger":"queue"`). Until the app's
+26.1117 update (20-11-2026) the bridge spoke to the app's IPC router (~/.codex/ipc/ipc.sock,
+`thread-follower-start-turn`); that router is gone from the app, and the socket refuses.
+Measured 23-11-2026 with the app open. Not measured: what the app does with a queued message
+while it is closed.
 
 What it does NOT change:
 - Read marks. Delivering is not reading: the agent still reads with `inbox`/`read`, and what
@@ -30,35 +32,31 @@ What it does NOT change:
   agent may do about them is what its human allowed, in the chat or in its user-level
   instructions (~/.codex/AGENTS.md), never what a message says.
 
-Only into an idle chat. The router does NOT refuse a start while a turn is running: it slips
-the text into that turn, where the app shows it twice and loses track of the turn — its stop
-button stops nothing, and an answer to a question Codex asked is not sent. So the bridge reads
-the chat's own record (~/.codex/sessions/**/rollout-*-THREAD_ID.jsonl): a `task_started` not
-yet closed by `task_complete` or `turn_aborted` is a turn in progress, and the mail waits for
-its end. Messages that arrive meanwhile go in the same turn: one turn per batch, never one
-per message. A chat with no record yet counts as idle. If the router refuses, the bridge
-tries again after RETRY seconds. Python 3.9+, standard library only.
+Only into an idle chat. The old router slipped a start into a running turn (shown twice, a stop
+button that stopped nothing); whether a queued message waits for the turn instead is not
+measured, so the bridge still waits itself: it reads the chat's own record
+(~/.codex/sessions/**/rollout-*-THREAD_ID.jsonl), where a `task_started` not yet closed by
+`task_complete` or `turn_aborted` is a turn in progress, and the mail waits for its end.
+Messages that arrive meanwhile go in the same turn: one turn per batch, never one per message.
+A chat with no record yet counts as idle. If `codex queue` fails, the bridge tries again after
+RETRY seconds. Python 3.9+, standard library only.
 """
 import argparse
 import glob
 import importlib.util
 import json
 import os
-import socket
-import struct
+import shutil
+import subprocess
 import sys
 import time
-import uuid
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 _spec = importlib.util.spec_from_file_location("palomar", os.path.join(HERE, "palomar.py"))
 palomar = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(palomar)
 
-SOCK = os.path.expanduser("~/.codex/ipc/ipc.sock")
-# The protocol version the app expects for the method (its table: thread-follower-start-turn
-# is 2). A mismatch is refused by the owning window, which is what we want.
-START_TURN_VERSION = 2
+CODEX_BIN = os.environ.get("CODEX_BIN") or (shutil.which("codex") or "/usr/lib/chatgpt/resources/codex")
 SETTLE = 3.0    # after the first new message, wait this long for the rest of a burst
 RETRY = 20.0    # the chat was busy or unreachable: try again after this long
 TIMEOUT = 30.0
@@ -75,61 +73,17 @@ def log(*a):
     print(time.strftime("%H:%M:%S"), *a, file=sys.stderr, flush=True)
 
 
-def _send(s, obj):
-    b = json.dumps(obj).encode()
-    s.sendall(struct.pack("<I", len(b)) + b)
-
-
-def _recv(s):
-    def exact(n):
-        b = b""
-        while len(b) < n:
-            c = s.recv(n - len(b))
-            if not c:
-                raise EOFError("the Codex app closed the connection")
-            b += c
-        return b
-    return json.loads(exact(struct.unpack("<I", exact(4))[0]))
-
-
-def _request(s, method, params, version):
-    rid = str(uuid.uuid4())
-    _send(s, {"type": "request", "requestId": rid, "method": method,
-              "params": params, "version": version})
-    deadline = time.monotonic() + TIMEOUT
-    while time.monotonic() < deadline:
-        m = _recv(s)
-        if m.get("type") == "response" and m.get("requestId") == rid:
-            return m
-        if m.get("type") == "client-discovery-request":
-            # We own no chat: never take a request meant for a window.
-            _send(s, {"type": "client-discovery-response", "requestId": m["requestId"],
-                      "response": {"canHandle": False}})
-    raise TimeoutError(method)
-
-
 def start_turn(thread_id, text):
-    """Starts a turn in the chat; returns None, or the reason it did not."""
+    """Queues the text in the chat, which starts a turn there; returns None, or why it did not."""
     try:
-        with socket.socket(socket.AF_UNIX) as s:
-            s.settimeout(TIMEOUT)
-            s.connect(SOCK)
-            r = _request(s, "initialize", {"clientType": "palomar-codex-wake"}, 0)
-            if r.get("resultType") != "success":
-                return f"initialize: {r.get('error')}"
-            r = _request(s, "thread-follower-start-turn", {
-                "conversationId": thread_id,
-                "turnStart": {
-                    "request": {"threadId": thread_id,
-                                "input": [{"type": "text", "text": text, "text_elements": []}]},
-                    "context": {"inheritThreadSettings": True},
-                },
-            }, START_TURN_VERSION)
-            if r.get("resultType") != "success":
-                return str(r.get("error"))
-            return None
-    except (OSError, EOFError, TimeoutError, ValueError) as e:
+        r = subprocess.run([CODEX_BIN, "queue", "--thread", thread_id, "--message", text],
+                           capture_output=True, text=True, timeout=TIMEOUT,
+                           stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired) as e:
         return f"{type(e).__name__}: {e}"
+    if r.returncode != 0:
+        return f"codex queue exited {r.returncode}: {(r.stderr or r.stdout).strip()[:300]}"
+    return None
 
 
 class Chat:
