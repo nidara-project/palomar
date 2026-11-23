@@ -92,10 +92,12 @@ The database is `$PALOMAR_DB`, else `$XDG_DATA_HOME/palomar/palomar.db`
 - **Codex desktop**: `palomar-codex-wake.service` starts a turn in the chat that last ran
   `palomar-codex-wake.py --claim` from its own terminal (Codex sets `$CODEX_THREAD_ID` there;
   a new chat claims and takes over, nothing restarts) when there is mail for `codex`,
-  through the desktop app's own IPC socket (`~/.codex/ipc/ipc.sock`). Busy, the notice lands
-  in the running turn without stopping it; idle, it starts one. A burst is one turn;
-  delivering is not reading, and what the agent has already read is never delivered. It is
-  the app's internal protocol, not a published API: after an app update, check the log.
+  by queueing the notice with `codex queue --thread ID --message TEXT` (the Codex CLI that
+  ships inside the desktop app); the app starts the turn. A chat in a turn gets it when the
+  turn ends, and a burst is one turn; delivering is not reading, and what the agent has
+  already read is never delivered. Before the app's 26.1117 update this went through the
+  app's IPC socket (`~/.codex/ipc/ipc.sock`), which that update removed; after an update,
+  check the log.
 - **Other MCP clients**: no external event can start a turn, so the agent checks `inbox` at
   the start of a task and between tasks, or blocks on `wait` when it expects a reply. An idle
   agent is not woken by anything; its human nudges it.
